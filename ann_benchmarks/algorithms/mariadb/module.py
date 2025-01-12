@@ -17,10 +17,41 @@ import mariadb
 
 from ..base.module import BaseANN
 
-def many_inserts(arg):
-    conn = mariadb.connect(unix_socket=arg[0])
+# Environment variables
+#  PERF - if "yes" then try to run "perf stat"
+#  FLAMEGRAPH - if "yes" then try to run "perf record"
+#  DO_INIT_MARIADB - if "yes" then initialize MariaDB
+#  DO_START_MARIADB - if "yes" then start MariaDB, otherwise MariaDB should already be running
+#  MARIADB_DB_NAME - the name of the database to use, "ann" by default
+#  MARIADB_BATCH_CONCURRENCY - number of concurrent sessions for inserts and queries.
+#                              When not set the number of sessions is os.cpu_count()
+#
+#  Options to set if initializing or starting MariaDB here
+#    MARIADB_ROOT_DIR - root directory for MariaDB install
+#    MARIADB_SOURCE_DIR - value for --srcdir
+#    MARIADB_DB_WORKSPACE - root for database MariaDB data and log directories
+#
+# Options to set if MariaDB is already running
+#    MARIADB_CONN_ARGS - username, password, host, and port to connect in the format "user:password:host:port"
+
+def get_cursor(conn_args, do_autocommit):
+    if conn_args["socket"] is not None:
+        conn = mariadb.connect(unix_socket=conn_args["socket"],
+                               database = conn_args["db_name"],
+                               autocommit=do_autocommit)
+    else:
+        conn = mariadb.connect(user = conn_args["user"],
+                               password = conn_args["password"],
+                               host = conn_args["host"],
+                               port = int(conn_args["port"]),
+                               database = conn_args["db_name"],
+                               autocommit=do_autocommit)
     cur = conn.cursor()
-    cur.execute("USE ann")
+    # cur.execute("USE %s" % conn_args[1])
+    return cur
+
+def many_inserts(arg):
+    cur = get_cursor(arg[0], False)
     cur.execute("SET rand_seed1=1, rand_seed2=2")
     rps = 100
     lenX= len(arg[2])
@@ -37,16 +68,16 @@ def many_inserts(arg):
             rps=i/(time.time()-start_time)
             print(f"{i:6d} of {lenX}, {rps:4.2f} stmt/sec, ETA {(lenX-i)/rps:.0f} sec")
     cur.execute("commit")
+    cur.close()
 
 def many_queries(arg):
-    conn = mariadb.connect(unix_socket=arg[0])
-    cur = conn.cursor()
+    cur = get_cursor(arg[0], True)
     cur.execute("SET mhnsw_ef_search = %d" % arg[1])
-    cur.execute("USE ann")
     res = []
     for v in arg[4]:
         cur.execute(f"SELECT id FROM t1 ORDER by vec_distance_{arg[2]}(v, %s) LIMIT %d", (vector_to_hex(v), arg[3]))
         res.append([id for id, in cur.fetchall()])
+    cur.close()
     return res
 
 def vector_to_hex(v):
@@ -63,6 +94,8 @@ class MariaDB(BaseANN):
         self._perf_records = []
         self._perf_stats = []
         self._batch = inspect.stack()[2].frame.f_locals['batch'] # Yo-ho-ho!
+        print(f"--batch is %s" % self._batch)
+
         self._engine = method_param['engine']
         self._size = 0
 
@@ -73,13 +106,15 @@ class MariaDB(BaseANN):
         else:
             raise RuntimeError(f"unknown metric {metric}")
         
+        print(f"--batch is %s" % self._batch)
+        print(f"engine is %s" % self._engine)
+        print(f"%d M, %s metric" % (self._m,  self._metric))
+
         self.prepare_options()
         self.initialize_db()
         self.start_db()
 
-        # Connect to MariaDB using Unix socket
-        conn = mariadb.connect(unix_socket=self._socket_file)
-        self._cur = conn.cursor()
+        self._cur = get_cursor(self._conn_args, True)
 
     def prepare_options(self):
         self._perf_stat = os.environ.get('PERF', 'no') == 'yes' and MariaDB.can_run_perf()
@@ -88,6 +123,33 @@ class MariaDB(BaseANN):
         if self._perf_stat and self._perf_record:
             self._perf_stat = False
             print("\nWarning: Better not to enable both PERF and FLAMEGRAPH. Generating a flame graph only.\n")
+
+        self._do_init_mariadb = False
+        self._socket_file = None
+        self._mariadb_init_cmd = None
+        self._mariadb_start_cmd = None
+        self._mariadbd_proc = None
+        # Use socket when not None, else use user, password, host and port
+        self._conn_args = { "db_name":None, "socket":None, "user":None, "password":None, "host":None, "port": None }
+
+        self._db_name = self._conn_args["db_name"] = os.environ.get('MARIADB_DB_NAME', 'ann')
+        print(f"MariaDB database name is %s" % self._db_name)
+
+        self._batch_concurrency = int(os.environ.get('MARIADB_BATCH_CONCURRENCY', str(os.cpu_count())))
+        print(f"MariaDB concurrency for --batch is %d" % self._batch_concurrency)
+
+        self._do_start_mariadb = os.environ.get('DO_START_MARIADB', 'no') == 'yes'
+        if not self._do_start_mariadb:
+            conn_str = iadb = os.environ.get('MARIADB_CONN_ARGS', 'none')
+            conn_parts = conn_str.split(":")
+            if len(conn_parts) != 4:
+                raise RuntimeError(f"Could not parse MARIADB_CONN_ARGS - %s" % conn_str)
+            # MARIADB_CONN_ARGS "user:password:database:host:port"
+            self._user = self._conn_args["user"] = conn_parts[0]
+            self._password = self._conn_args["password"] = conn_parts[1]
+            self._host = self._conn_args["host"] = conn_parts[2]
+            self._port = self._conn_args["port"] = conn_parts[3]
+            return
 
         # MariaDB build dir or installed dir
         mariadb_root_dir = os.environ.get('MARIADB_ROOT_DIR')
@@ -100,7 +162,7 @@ class MariaDB(BaseANN):
         mariadb_source_dir = os.environ.get('MARIADB_SOURCE_DIR')
 
         # Initialize database when running locally
-        self._do_init_mariadb = os.environ.get('DO_INIT_MARIADB', 'yes') == 'yes'
+        self._do_init_mariadb = os.environ.get('DO_INIT_MARIADB', 'no') == 'yes'
 
         # DB workfolder: data + error log
         mariadb_db_workspace = os.environ.get('MARIADB_DB_WORKSPACE')
@@ -113,7 +175,7 @@ class MariaDB(BaseANN):
 
         # Generate a socket file name under /tmp to make sure the file path is always under 107 character, to avoid "The socket file path is too long" error
         dset=inspect.stack()[3].frame.f_locals['dataset_name'] + '-'
-        self._socket_file = tempfile.mktemp(prefix=dset, suffix='.sock', dir='/tmp')
+        self._socket_file = self._conn_args["socket"] = tempfile.mktemp(prefix=dset, suffix='.sock', dir='/tmp')
 
         print("\nSetup paths:")
         print(f"MARIADB_ROOT_DIR: {mariadb_root_dir}")
@@ -145,23 +207,24 @@ class MariaDB(BaseANN):
             "--skip_networking",
             "--loose-innodb-buffer-pool-size=16G",
             "--loose-mhnsw-cache-size=10G",
-            f"--mhnsw_default_m={self._m}",
             "--skip_grant_tables"
         ]
         user_option = MariaDB.get_user_option()
         if user_option is not None:
             self._mariadb_start_cmd += user_option
-        self._mariadbd_proc = None
 
     def initialize_db(self):
+        if not self._do_init_mariadb:
+            print('Not initializing MariaDB')
+            return
+    
         try:
             # In ann-benchmarks build, the server was initialized in Docker image, but when running locally we want to start it with a new initialization
-            if self._do_init_mariadb:
-                print("\nInitialize MariaDB database...")
-                print(self._mariadb_init_cmd)
-                #subprocess.run(self._mariadb_init_cmd, shell=True, check=True, stdout=sys.stdout, stderr=sys.stderr)
-                init_proc = subprocess.Popen(self._mariadb_init_cmd, stdout=sys.stdout, stderr=sys.stderr)
-                init_proc.wait()
+            print("\nInitialize MariaDB database...")
+            print(self._mariadb_init_cmd)
+            #subprocess.run(self._mariadb_init_cmd, shell=True, check=True, stdout=sys.stdout, stderr=sys.stderr)
+            init_proc = subprocess.Popen(self._mariadb_init_cmd, stdout=sys.stdout, stderr=sys.stderr)
+            init_proc.wait()
         except Exception as e:
             print("ERROR: Failed to initialize MariaDB database:", e)
             raise
@@ -259,6 +322,11 @@ class MariaDB(BaseANN):
                     print("Error reading the perf stat file.")
 
     def start_db(self):
+        # Initialize database when running locally
+        if not self._do_start_mariadb:
+            print('Not starting MariaDB')
+            return
+
         try:
             print("\nStarting MariaDB server...")
             print(self._mariadb_start_cmd)
@@ -283,16 +351,18 @@ class MariaDB(BaseANN):
     def fit(self, X):
         # Prepare database and table
         print("\nPreparing database and table...")
-        self._cur.execute("DROP DATABASE IF EXISTS ann")
-        self._cur.execute("CREATE DATABASE ann")
-        self._cur.execute("USE ann")
-        self._cur.execute(f"""
+        self._cur.execute("DROP DATABASE IF EXISTS %s" % self._db_name)
+        self._cur.execute("CREATE DATABASE %s" % self._db_name)
+        self._cur.execute("USE %s" % self._db_name)
+        ddl = f"""
           CREATE TABLE t1 (
             id INT PRIMARY KEY,
-            v VECTOR({len(X[0])}) NOT NULL,
-            VECTOR INDEX (v) DISTANCE_FUNCTION={self._metric}
+            v VECTOR({len(X[0])}) NOT NULL
           ) MIN_ROWS={len(X)} ENGINE={self._engine}
-        """)
+        """
+        # VECTOR INDEX (v) M={self._m} DISTANCE={self._metric}
+        print(f"ddl is: %s" % ddl)
+        self._cur.execute(ddl)
 
         # Insert data
         print("\nInserting data...")
@@ -300,17 +370,20 @@ class MariaDB(BaseANN):
         start_time = time.time()
         if self._batch:
             XX=[]
-            for i in range(os.cpu_count()):
-                n = int(len(X)/os.cpu_count()*i)
-                XX.append((self._socket_file, n, X[n:int(len(X)/os.cpu_count()*(i+1))]))
-            pool = Pool()
+            concur = self._batch_concurrency
+            for i in range(concur):
+                n = int((len(X) / concur) * i)
+                XX.append((self._conn_args, n, X[n:int((len(X)/ concur) * (i+1))]))
+            pool = Pool(concur)
             self._res = pool.map(many_inserts, XX)
         else:
             self.perf_start("inserting")
-            self._cur.execute("SET rand_seed1=1, rand_seed2=2")
+            # print(f"at insert ef_search %d" % self._ef_search)
+            icur = get_cursor(self._conn_args, False)
+            icur.execute("SET rand_seed1=1, rand_seed2=2")
             rps, rows, last, total=1000, 0, time.time(), 1
             for i, embedding in enumerate(X):
-                self._cur.execute("INSERT INTO t1 (id, v) VALUES (%d, %s)", (i, vector_to_hex(embedding)))
+                icur.execute("INSERT INTO t1 (id, v) VALUES (%d, %s)", (i, vector_to_hex(embedding)))
                 if i - rows > rps:
                     now=time.time()
                     rps=((i-rows)/(now-last) + 19*rps)/20
@@ -318,37 +391,47 @@ class MariaDB(BaseANN):
                     total=now-start_time+eta
                     last, rows=now, i
                     print(f"{i:6_} of {len(X):_}, {rps:4.2f} stmt/sec ETA {eta:.0f} of {total:.0f} sec")
-            self._cur.execute("commit")
+            icur.execute("commit")
             self.perf_stop()
         print(f"\nInsert time for {X.size:_} records: {time.time() - start_time:7.2f}")
 
         # Create index
         print("\nCreating index...")
+
         self.perf_start("indexing")
         start_time = time.time()
         if self._metric == "angular":
-            pass
+            d = 'cosine'
         elif self._metric == "euclidean":
-            # The feature is being developed
-            # Currently stack will be empty for indexing in perf data as nothing is executed
-            #self._cur.execute("ALTER TABLE `t1` ADD VECTOR INDEX (v);")
+            d = 'euclidean'
             pass
         else:
-            pass
+            print(f"metric %s not supported" % self._metric)
+            assert True
+
+        # VECTOR INDEX (v) M={self._m} DISTANCE={self._metric}
+        ddl = f"ALTER TABLE `t1` ADD VECTOR INDEX (v) M=%d DISTANCE=%s" % (self._m, d)
+        print(f"ddl is: %s" % ddl)
+        self._cur.execute(ddl)
+
         self.perf_stop()
 
-        stem = os.environ.get('MARIADB_DB_WORKSPACE') + '/data/ann/t1#i#01.'
-        for f in glob.glob(stem + 'ibd') + glob.glob(stem + 'MY[ID]'):
-            self._size += os.stat(f).st_size
+        size_query = f"""select FILE_SIZE from information_schema.innodb_sys_tablespaces where 
+                         name = \"%s/t1#i#01\" """ % self._conn_args["db_name"]
+        self._cur.execute(size_query)
+        self._size = int(self._cur.fetchone()[0])
+        print(f"Size is %d MB" % (self._size / (1024*1024)))
 
         self.perf_start("searching")
 
     def set_query_arguments(self, ef_search):
         # Set ef_search
+        print(f"ef_search %d" % ef_search)
         self._ef_search = ef_search
         self._cur.execute("SET mhnsw_ef_search = %d" % ef_search)
 
     def query(self, v, n):
+        # print(f"query limit %d with ef_search %d" % (n, self._ef_search))
         self._cur.execute(f"SELECT id FROM t1 ORDER by vec_distance_{self._metric}(v, %s) LIMIT %d", (vector_to_hex(v), n))
         return [id for id, in self._cur.fetchall()]
 
@@ -359,8 +442,9 @@ class MariaDB(BaseANN):
         ef = self._ef_search
 
         XX=[]
-        for i in range(os.cpu_count()):
-            XX.append((self._socket_file, self._ef_search, self._metric, n, X[int(len(X)/os.cpu_count()*i):int(len(X)/os.cpu_count()*(i+1))]))
+        concur = self._batch_concurrency
+        for i in range(concur):
+            XX.append((self._conn_args, self._ef_search, self._metric, n, X[int(len(X)/concur*i):int(len(X)/concur*(i+1))]))
         pool = Pool()
         self._res = pool.map(many_queries, XX)
 
@@ -368,12 +452,14 @@ class MariaDB(BaseANN):
         return chain(*self._res)
 
     def __str__(self):
-        return f"MariaDB(m={self._m:2d}, ef_search={self._ef_search})"
+        return f"MariaDB(m={self._m}, ef_search={self._ef_search})"
 
     def done(self):
         # Shutdown MariaDB server when benchmarking done
-        self._cur.execute("shutdown")
-        self._mariadbd_proc.wait(300)
+        if self._do_start_mariadb:
+            self._cur.execute("shutdown")
+            self._mariadbd_proc.wait(300)
+
         # Stop perf for searching and do final analysis
         self.perf_stop()
         self.perf_analysis()
