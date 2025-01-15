@@ -393,7 +393,8 @@ class MariaDB(BaseANN):
                     print(f"{i:6_} of {len(X):_}, {rps:4.2f} stmt/sec ETA {eta:.0f} of {total:.0f} sec")
             icur.execute("commit")
             self.perf_stop()
-        print(f"\nInsert time for {X.size:_} records: {time.time() - start_time:7.2f}")
+        load_secs = time.time() - start_time
+        print(f"\nInsert time for {X.size:_} records: {load_secs:7.2f}")
 
         # Create index
         print("\nCreating index...")
@@ -413,6 +414,7 @@ class MariaDB(BaseANN):
         ddl = f"ALTER TABLE `t1` ADD VECTOR INDEX (v) M=%d DISTANCE=%s" % (self._m, d)
         print(f"ddl is: %s" % ddl)
         self._cur.execute(ddl)
+        index_secs = time.time() - start_time
 
         self.perf_stop()
 
@@ -420,7 +422,14 @@ class MariaDB(BaseANN):
                          name = \"%s/t1#i#01\" """ % self._conn_args["db_name"]
         self._cur.execute(size_query)
         self._size = int(self._cur.fetchone()[0])
-        print(f"Size is %d MB" % (self._size / (1024*1024)))
+
+        size_query = f"""select FILE_SIZE from information_schema.innodb_sys_tablespaces where 
+                         name = \"%s/t1\" """ % self._conn_args["db_name"]
+        self._cur.execute(size_query)
+        table_size = int(self._cur.fetchone()[0])
+        MB = 1024 * 1024
+        print(f"DDL: table %d MB in %.1f seconds, index %d MB in %.1f seconds" % (
+            table_size/MB, load_secs, self._size/MB, index_secs))
 
         self.perf_start("searching")
 

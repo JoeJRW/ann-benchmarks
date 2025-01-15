@@ -7,6 +7,7 @@ from multiprocessing.pool import Pool
 import os
 import pgvector.psycopg
 import psycopg
+import time
 
 from ..base.module import BaseANN
 
@@ -94,16 +95,26 @@ class PGVectorBase(BaseANN):
         cur.execute("CREATE TABLE items (id int, embedding vector(%d))" % X.shape[1])
         cur.execute("ALTER TABLE items ALTER COLUMN embedding SET STORAGE PLAIN")
         print("copying data...")
+        load_start_time = time.time()
         with cur.copy("COPY items (id, embedding) FROM STDIN") as copy:
             for i, embedding in enumerate(X):
                 copy.write_row((i, embedding))
+        load_secs = time.time() - load_start_time
+
         index_ddl = self.get_index_ddl(X)
         print("creating index as %s" % index_ddl)
+        index_start_time = time.time()
         cur.execute(index_ddl)
+        index_secs = time.time() - index_start_time
 
         cur.execute("SELECT pg_relation_size('items_embedding_idx')")
         self._size = cur.fetchone()[0]
-        print(f"Size is %d MB" % (self._size / (1024*1024)))
+
+        cur.execute("SELECT pg_relation_size('items')")
+        table_size = cur.fetchone()[0]
+        MB = 1024*1024
+        print(f"DDL: table %d MB in %.1f seconds, index %d MB in %.1f seconds" % (
+            table_size/MB, load_secs, self._size/MB, index_secs))
 
         print("done!")
         self._cur = cur

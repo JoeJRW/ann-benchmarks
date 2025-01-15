@@ -123,6 +123,7 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--run-disabled", help="run algorithms that are disabled in algos.yml", action="store_true")
     parser.add_argument("--parallelism", type=positive_int, help="Number of Docker containers in parallel", default=1)
+    parser.add_argument("--respect_config_order", action="store_true", help="If set run tests in the order listed in config.yml")
 
     args = parser.parse_args()
     if args.timeout == -1:
@@ -314,7 +315,8 @@ def main():
         distance_metric=dataset.attrs["distance"],
         count=args.count
     )
-    random.shuffle(definitions)
+    if not args.respect_config_order:
+        random.shuffle(definitions)
 
     definitions = filter_already_run_definitions(definitions, 
         dataset=args.dataset, 
