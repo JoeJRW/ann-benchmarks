@@ -98,6 +98,9 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--list-algorithms", help="print the names of all known algorithms and exit", action="store_true"
     )
+    parser.add_argument(
+        "--list-datasets", help="print the names of all known datasets and exit", action="store_true"
+    )
     parser.add_argument("--force", help="re-run algorithms even if their results already exist", action="store_true")
     parser.add_argument(
         "--runs",
@@ -300,6 +303,11 @@ def limit_algorithms(definitions: List[Definition], limit: int) -> List[Definiti
 
 def main():
     args = parse_arguments()
+
+    if args.list_datasets:
+        for k in DATASETS.keys(): print(k)
+        print(DATASETS)
+        sys.exit(0)
 
     if args.list_algorithms:
         list_algorithms(args.definitions)

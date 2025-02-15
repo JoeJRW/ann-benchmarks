@@ -401,17 +401,9 @@ class MariaDB(BaseANN):
 
         self.perf_start("indexing")
         start_time = time.time()
-        if self._metric == "angular":
-            d = 'cosine'
-        elif self._metric == "euclidean":
-            d = 'euclidean'
-            pass
-        else:
-            print(f"metric %s not supported" % self._metric)
-            assert True
 
         # VECTOR INDEX (v) M={self._m} DISTANCE={self._metric}
-        ddl = f"ALTER TABLE `t1` ADD VECTOR INDEX (v) M=%d DISTANCE=%s" % (self._m, d)
+        ddl = f"ALTER TABLE `t1` ADD VECTOR INDEX (v) M=%d DISTANCE=%s" % (self._m, self._metric)
         print(f"ddl is: %s" % ddl)
         self._cur.execute(ddl)
         index_secs = time.time() - start_time

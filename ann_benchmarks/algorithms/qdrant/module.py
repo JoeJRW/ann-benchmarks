@@ -36,6 +36,7 @@ class Qdrant(BaseANN):
         self._search_params = {"hnsw_ef": None, "rescore": True}
         self.batch_results = []
         self.batch_latencies = []
+        print(f"Qdrant: %s ef_cons, %s M, %s metric, %s quantization\n" % (ef_construct, m, metric, quantization))
 
         qdrant_client_params = {
             "host": "localhost",
@@ -95,6 +96,7 @@ class Qdrant(BaseANN):
         )
 
         # Re-enabling indexing
+        start_time = time()
         self._client.update_collection(
             collection_name=self._collection_name,
             optimizers_config=OptimizersConfigDiff(
@@ -118,6 +120,7 @@ class Qdrant(BaseANN):
                 print(f"Indexed vectors: {collection_info.indexed_vectors_count}")
                 print(f"Collection status: {collection_info.indexed_vectors_count}")
                 break
+        print(f"Indexed in %.1f seconds coll_info : %s\n" % (time() - start_time, collection_info))
 
     def set_query_arguments(self, hnsw_ef, rescore):
         self._search_params["hnsw_ef"] = hnsw_ef
@@ -200,4 +203,4 @@ class Qdrant(BaseANN):
 
     def __str__(self):
         hnsw_ef = self._search_params["hnsw_ef"]
-        return f"Qdrant(quantization={self._quantization_mode}, hnsw_ef={hnsw_ef})"
+        return f"Qdrant((m={self._m}, ef_construct={self._ef_construct}, quantization={self._quantization_mode}, hnsw_ef={hnsw_ef})"

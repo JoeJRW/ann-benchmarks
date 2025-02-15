@@ -57,6 +57,7 @@ def get_dataset(dataset_name: str) -> Tuple[h5py.File, int]:
         print(f"Cannot download {dataset_url}")
         if dataset_name in DATASETS:
             print("Creating dataset locally")
+            print("dset: %s : %s" % (dataset_name, DATASETS[dataset_name]))
             DATASETS[dataset_name](hdf5_filename)
 
     hdf5_file = h5py.File(hdf5_filename, "r")
