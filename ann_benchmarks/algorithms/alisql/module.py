@@ -34,7 +34,7 @@ from ..base.module import BaseANN
 # Options to set if MySQL is already running
 #    MYSQL_CONN_ARGS - username, password, host, and port to connect in the format "user:password:host:port"
 
-def get_cursor(conn_args, do_autocommit):
+def get_cursor(conn_args, do_autocommit, do_prepare):
     if conn_args["socket"] is not None:
         conn = mysql.connector.connect(unix_socket=conn_args["socket"],
                                database = conn_args["db_name"],
@@ -46,12 +46,12 @@ def get_cursor(conn_args, do_autocommit):
                                port = int(conn_args["port"]),
                                database = conn_args["db_name"],
                                autocommit=do_autocommit)
-    cur = conn.cursor()
+    cur = conn.cursor(prepared=do_prepare)
     # cur.execute("USE %s" % conn_args[1])
     return conn, cur
 
 def many_inserts(arg):
-    conn, cur = get_cursor(arg[0], False)
+    conn, cur = get_cursor(arg[0], False, True)
     cur.execute("SET rand_seed1=1, rand_seed2=2")
     rps = 100
     lenX= len(arg[2])
@@ -72,7 +72,7 @@ def many_inserts(arg):
     conn.close()
 
 def many_queries(arg):
-    conn, cur = get_cursor(arg[0], True)
+    conn, cur = get_cursor(arg[0], True, True)
     cur.execute("SET vidx_hnsw_ef_search = %s" % arg[1])
     res = []
     for v in arg[4]:
@@ -83,7 +83,7 @@ def many_queries(arg):
     return res
 
 def vector_to_hex(v):
-    return numpy.array(v, 'float32').tobytes().hex()
+    return numpy.array(v, 'float32').tobytes()
 
 class AliSQL(BaseANN):
 
@@ -117,7 +117,7 @@ class AliSQL(BaseANN):
         self.initialize_db()
         self.start_db()
 
-        self._conn, self._cur = get_cursor(self._conn_args, True)
+        self._conn, self._cur = get_cursor(self._conn_args, True, False)
 
     def prepare_options(self):
         self._perf_stat = os.environ.get('PERF', 'no') == 'yes' and AliSQL.can_run_perf()
@@ -376,7 +376,7 @@ class AliSQL(BaseANN):
         else:
             self.perf_start("inserting")
             # print(f"at insert ef_search %d" % self._ef_search)
-            iconn, icur = get_cursor(self._conn_args, False)
+            iconn, icur = get_cursor(self._conn_args, False, True)
             icur.execute("SET rand_seed1=1, rand_seed2=2")
             rps, rows, last, total=1000, 0, time.time(), 1
             for i, embedding in enumerate(X):
@@ -414,7 +414,7 @@ class AliSQL(BaseANN):
         self.perf_stop()
 
         size_query = f"""select FILE_SIZE from information_schema.innodb_tablespaces where 
-                         name = \"%s/t1__i__01\" """ % self._conn_args["db_name"]
+                         name = \"%s/t1__i__v\" """ % self._conn_args["db_name"]
         self._cur.execute(size_query)
         self._size = int(self._cur.fetchone()[0])
         print(f"Size is %d MB" % (self._size / (1024*1024)))
@@ -429,7 +429,8 @@ class AliSQL(BaseANN):
 
     def query(self, v, n):
         # print(f"query limit %d with ef_search %d" % (n, self._ef_search))
-        self._cur.execute(f"SELECT id FROM t1 ORDER by vec_distance_{self._metric}(v, %s) LIMIT %s", (vector_to_hex(v), n))
+        iconn, icur = get_cursor(self._conn_args, False, True)
+        icur.execute(f"SELECT id FROM t1 ORDER by vec_distance_{self._metric}(v, %s) LIMIT %s", (vector_to_hex(v), n))
         return [id for id, in self._cur.fetchall()]
 
     def get_memory_usage(self):
